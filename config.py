@@ -16,7 +16,7 @@ SAC_CONFIG = {
 
 # ========== 資料集配置 ==========
 DATA_CONFIG = {
-    'data_path': 'data/data_15m.csv',  # 資料路徑
+    'data_path': 'h:/program_dev/trading_system/v1.0.0/data/data_15m.csv',  # 資料路徑
     'train_ratio': 0.6,         # 訓練集比例
     'val_ratio': 0.2,           # 驗證集比例
     'test_ratio': 0.2,          # 測試集比例
@@ -42,4 +42,10 @@ TRAIN_CONFIG = {
     'print_frequency': 5,       # 每 N 個 episode 打印一次訓練信息
     'early_stopping_patience': 20,  # 早停耐心值
     'target_return': 0.2,       # 目標收益率（用於早停）
+}
+
+# ========== Broker 配置 ==========
+BROKER_CONFIG = {
+    'initial_cash': 100000.0,   # 初始資金
+    'commission': 0.001,        # 手續費率（0.1%）
 }

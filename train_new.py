@@ -194,10 +194,13 @@ class TradingEnvironment:
         if self.position == 0 and action_value > 0.3:
             # 買入：滿倉
             self.position = 1
-            self.entry_price = next_price * (1 + self.commission)  # 加上手續費
+            self.entry_price = next_price  # 買入價格
         elif self.position == 1 and action_value < -0.3:
-            # 賣出
-            profit = (next_price * (1 - self.commission) - self.entry_price) / self.entry_price
+            # 賣出：計算收益（扣除買賣手續費）
+            # 收益 = (賣出價 - 買入價) / 買入價 - 手續費
+            price_profit = (next_price - self.entry_price) / self.entry_price
+            # 買入和賣出各扣一次手續費
+            profit = price_profit - 2 * self.commission
             self.total_profit += profit
             self.cash = self.cash * (1 + profit)  # 更新資金
             self.position = 0
