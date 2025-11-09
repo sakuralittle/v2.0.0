@@ -558,6 +558,10 @@ def test_model(df, model_path):
     print("="*70)
     
     # 創建 agent（推理模式）
+    import torch
+    device_config = TRAIN_CONFIG.get('device', 'auto')
+    force_cuda = TRAIN_CONFIG.get('force_cuda', False)
+    
     agent = create_sac_agent(
         state_dim=SAC_CONFIG['state_dim'],
         action_dim=SAC_CONFIG['action_dim'],
@@ -565,8 +569,11 @@ def test_model(df, model_path):
         gamma=SAC_CONFIG['gamma'],
         tau=SAC_CONFIG['tau'],
         alpha=SAC_CONFIG['alpha'],
-        train_mode=False  # 推理模式
+        train_mode=False,  # 推理模式
+        device=device_config,
+        force_cuda=force_cuda
     )
+    print(f"使用設備: {agent.device}")
     
     # 載入最佳模型
     if not os.path.exists(model_path):
@@ -656,16 +663,40 @@ def train_sac_model(train_df, val_df, num_episodes=None, enable_validation=True)
     print("開始訓練 SAC 模型")
     print("="*70)
     
+    # 檢查並顯示設備信息
+    import torch
+    device_config = TRAIN_CONFIG.get('device', 'auto')
+    force_cuda = TRAIN_CONFIG.get('force_cuda', False)
+    
+    print("\n🖥️  設備配置:")
+    print(f"  設備選項: {device_config}")
+    print(f"  強制使用 CUDA: {force_cuda}")
+    print(f"  CUDA 可用: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"  GPU 型號: {torch.cuda.get_device_name(0)}")
+        print(f"  CUDA 版本: {torch.version.cuda}")
+    
     # 創建 SAC agent（訓練模式）
-    agent = create_sac_agent(
-        state_dim=SAC_CONFIG['state_dim'],
-        action_dim=SAC_CONFIG['action_dim'],
-        learning_rate=SAC_CONFIG['learning_rate'],
-        gamma=SAC_CONFIG['gamma'],
-        tau=SAC_CONFIG['tau'],
-        alpha=SAC_CONFIG['alpha'],
-        train_mode=True
-    )
+    try:
+        agent = create_sac_agent(
+            state_dim=SAC_CONFIG['state_dim'],
+            action_dim=SAC_CONFIG['action_dim'],
+            learning_rate=SAC_CONFIG['learning_rate'],
+            gamma=SAC_CONFIG['gamma'],
+            tau=SAC_CONFIG['tau'],
+            alpha=SAC_CONFIG['alpha'],
+            train_mode=True,
+            device=device_config,
+            force_cuda=force_cuda
+        )
+        print(f"  ✅ 使用設備: {agent.device}")
+    except RuntimeError as e:
+        print(f"\n❌ 設備配置錯誤: {e}")
+        print("\n提示: 如果要使用 CPU 訓練，請在 config.py 中設置:")
+        print("  TRAIN_CONFIG['force_cuda'] = False")
+        print("  或")
+        print("  TRAIN_CONFIG['device'] = 'cpu'")
+        raise
     
     # 創建 trainer
     cerebro_placeholder = bt.Cerebro()  # 佔位用

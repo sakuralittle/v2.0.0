@@ -101,7 +101,40 @@ python train_1.py
     'print_frequency': 5,       # 打印頻率
     'early_stopping_patience': 20,  # 早停耐心值
     'target_return': 0.2,       # 目標收益率 20%
+    'force_cuda': True,         # 是否強制使用 CUDA (GPU)
+    'device': 'auto',           # 設備選擇: 'auto', 'cuda', 'cpu'
 }
+```
+
+#### GPU / CPU 配置
+
+**強制使用 GPU 訓練** (推薦，訓練速度快 10-100 倍)：
+```python
+'force_cuda': True,    # GPU 不可用時報錯
+'device': 'auto',      # 自動選擇
+```
+
+**自動選擇設備** (GPU 優先，不可用則降級到 CPU)：
+```python
+'force_cuda': False,
+'device': 'auto',
+```
+
+**強制使用 CPU**：
+```python
+'force_cuda': False,
+'device': 'cpu',
+```
+
+訓練開始時會顯示設備信息：
+```
+🖥️  設備配置:
+  設備選項: auto
+  強制使用 CUDA: True
+  CUDA 可用: True
+  GPU 型號: NVIDIA GeForce RTX 3080
+  CUDA 版本: 11.8
+  ✅ 使用設備: cuda:0
 ```
 
 ### DATA_CONFIG
@@ -242,6 +275,49 @@ step_return = (current_value - previous_value) / previous_value
 5. **測試評估**：使用測試集評估最終模型
 
 ## 故障排除
+
+### GPU 相關問題
+
+#### GPU 不可用錯誤
+```
+RuntimeError: 強制使用 CUDA 但 GPU 不可用！
+```
+
+**解決方案：**
+1. **檢查 PyTorch 版本**：
+   ```bash
+   python -c "import torch; print(torch.cuda.is_available())"
+   ```
+   如果返回 `False`，需要安裝 CUDA 版本的 PyTorch
+
+2. **安裝 CUDA 版本的 PyTorch**：
+   ```bash
+   # 訪問 https://pytorch.org/ 選擇對應版本
+   # 例如 CUDA 11.8:
+   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+   ```
+
+3. **臨時使用 CPU 訓練**：
+   在 `config.py` 中設置：
+   ```python
+   TRAIN_CONFIG['force_cuda'] = False
+   TRAIN_CONFIG['device'] = 'cpu'
+   ```
+
+#### GPU 記憶體不足 (OOM)
+```
+RuntimeError: CUDA out of memory
+```
+
+**解決方案：**
+- 減少 `batch_size`（例如從 256 降到 128 或 64）
+- 減少 `replay_buffer_size`
+- 關閉其他佔用 GPU 的程序
+
+#### 訓練速度慢
+- 確認使用 GPU：訓練開始時檢查 `✅ 使用設備: cuda:0`
+- GPU 訓練應比 CPU 快 10-100 倍
+- 檢查資料傳輸瓶頸（確保資料在 GPU 上處理）
 
 ### 訓練收益率為負
 - 檢查獎勵函數設計

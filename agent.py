@@ -87,8 +87,30 @@ class ReplayBuffer:
 
 class SACAgent:
     """SAC 代理（支援訓練和推理）"""
-    def __init__(self, state_dim, action_dim, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2, train_mode=False):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, state_dim, action_dim, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2, train_mode=False, device='auto', force_cuda=False):
+        # 設備選擇邏輯
+        if device == 'auto':
+            if force_cuda:
+                if not torch.cuda.is_available():
+                    raise RuntimeError(
+                        "強制使用 CUDA 但 GPU 不可用！\n"
+                        "請確認：\n"
+                        "1. 是否安裝了 CUDA 版本的 PyTorch\n"
+                        "2. 系統是否有可用的 NVIDIA GPU\n"
+                        "3. CUDA 驅動是否正確安裝"
+                    )
+                self.device = torch.device("cuda")
+            else:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        elif device == 'cuda':
+            if not torch.cuda.is_available():
+                raise RuntimeError("指定使用 CUDA 但 GPU 不可用！")
+            self.device = torch.device("cuda")
+        elif device == 'cpu':
+            self.device = torch.device("cpu")
+        else:
+            raise ValueError(f"無效的設備選項: {device}，請使用 'auto', 'cuda' 或 'cpu'")
+        
         self.gamma = gamma
         self.tau = tau
         self.alpha = alpha
@@ -208,7 +230,7 @@ class SACAgent:
 
 # ==================== 工廠函數 ====================
 
-def create_sac_agent(state_dim, action_dim, learning_rate=3e-4, gamma=0.99, tau=0.005, alpha=0.2, train_mode=False):
+def create_sac_agent(state_dim, action_dim, learning_rate=3e-4, gamma=0.99, tau=0.005, alpha=0.2, train_mode=False, device='auto', force_cuda=False):
     """創建 SAC 代理
     
     參數:
@@ -219,5 +241,7 @@ def create_sac_agent(state_dim, action_dim, learning_rate=3e-4, gamma=0.99, tau=
         tau: 軟更新係數
         alpha: 熵溫度參數
         train_mode: 是否為訓練模式
+        device: 設備選擇 ('auto', 'cuda', 'cpu')
+        force_cuda: 是否強制使用 CUDA
     """
-    return SACAgent(state_dim, action_dim, learning_rate, gamma, tau, alpha, train_mode)
+    return SACAgent(state_dim, action_dim, learning_rate, gamma, tau, alpha, train_mode, device, force_cuda)

@@ -42,6 +42,8 @@ TRAIN_CONFIG = {
     'print_frequency': 5,       # 每 N 個 episode 打印一次訓練信息
     'early_stopping_patience': 20,  # 早停耐心值
     'target_return': 0.2,       # 目標收益率（用於早停）
+    'force_cuda': True,         # 是否強制使用 CUDA (GPU)，如果 GPU 不可用則報錯
+    'device': 'auto',           # 設備選擇: 'auto', 'cuda', 'cpu'
 }
 
 # ========== Broker 配置 ==========
