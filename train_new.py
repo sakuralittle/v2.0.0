@@ -1,11 +1,12 @@
 """
-SAC 代理訓練腳本 - 使用 Walk Forward 方法
+SAC 代理訓練腳本 - 使用 Walk Forward 方法（重構版）
 
 功能：
 1. 使用 Walk Forward 方法進行時間序列交叉驗證
 2. 訓練 SAC 代理進行交易決策
-3. 評估每個窗口的訓練效果
-4. 保存訓練好的模型
+3. 使用 Backtrader 的 IndicatorFactory 計算技術指標
+4. 評估每個窗口的訓練效果
+5. 保存訓練好的模型
 """
 
 import pandas as pd
@@ -22,69 +23,139 @@ from reward_function import calculate_reward
 from indicator import IndicatorFactory
 
 
-class TrainingStrategy(bt.Strategy):
-    """用於訓練的 Backtrader 策略"""
-    params = (
-        ('agent', None),
-        ('sac_config', SAC_CONFIG),
-        ('training_mode', True),
-    )
-    
+class IndicatorCalculator(bt.Strategy):
+    """用於預先計算所有技術指標的策略"""
     def __init__(self):
         # 使用 IndicatorFactory 計算技術指標
         self.hullma = IndicatorFactory.hullma_indicator(self.data)
-        self.rsi = IndicatorFactory.rsi(self.data, period=self.p.sac_config['rsi_period'])
-        self.cci = IndicatorFactory.cci(self.data, period=self.p.sac_config['cci_period'])
+        self.rsi = IndicatorFactory.rsi(self.data, period=SAC_CONFIG['rsi_period'])
+        self.cci = IndicatorFactory.cci(self.data, period=SAC_CONFIG['cci_period'])
         
-        # Z-score 正規化用的滾動窗口
-        self.state_history = deque(maxlen=self.p.sac_config['normalization_window'])
-        
-        # 紀錄訓練資訊
-        self.step_count = 0
-        self.episode_reward = 0
-        self.last_value = self.broker.getvalue()
-        self.trades_profit = []  # 每筆交易的收益率
-        
-        # 用於儲存當前狀態和動作
-        self.current_state = None
-        self.current_action = None
-        self.last_price = None
+        # 儲存指標值
+        self.indicator_values = {
+            'mhull': [],
+            'shull': [],
+            'signal': [],
+            'rsi': [],
+            'cci': []
+        }
     
-    def _build_state(self):
-        """構建狀態向量（未正規化）"""
-        # HMA 的三個輸出
-        mhull = self.hullma.mhull[0]
-        shull = self.hullma.shull[0]
-        signal = self.hullma.signal[0]
+    def next(self):
+        """每根 K 線記錄指標值"""
+        self.indicator_values['mhull'].append(self.hullma.mhull[0])
+        self.indicator_values['shull'].append(self.hullma.shull[0])
+        self.indicator_values['signal'].append(self.hullma.signal[0])
+        self.indicator_values['rsi'].append(self.rsi.rsi[0])
+        self.indicator_values['cci'].append(self.cci.cci[0])
+
+
+class TradingEnvironment:
+    """交易環境 - 使用 Backtrader 計算指標，自行管理交易邏輯"""
+    def __init__(self, data, initial_cash=100000, commission=0.001):
+        """
+        參數：
+            data: pandas DataFrame，包含 OHLCV 數據
+            initial_cash: 初始資金
+            commission: 手續費率
+        """
+        self.raw_data = data.copy().reset_index(drop=True)
+        self.initial_cash = initial_cash
+        self.commission = commission
         
-        # RSI 和 CCI
-        rsi = self.rsi.rsi[0]
-        cci = self.cci.cci[0]
+        # 使用 Backtrader 預先計算所有指標
+        print("計算技術指標...")
+        self._precalculate_indicators()
+        print("指標計算完成")
         
-        # 當前價格和成交量
-        current_price = self.data.close[0]
-        volume = self.data.volume[0]
+        self.reset()
+    
+    def _precalculate_indicators(self):
+        """使用 Backtrader 預先計算所有技術指標"""
+        data = self.raw_data.copy()
         
-        # 前 n 根 K 線的各自變化率
-        period = self.p.sac_config['price_change_period']
+        # 確保有時間索引
+        if not isinstance(data.index, pd.DatetimeIndex):
+            data.index = pd.date_range(start='2020-01-01', periods=len(data), freq='15min')
+        
+        # 創建 Backtrader 數據源
+        bt_data = bt.feeds.PandasData(
+            dataname=data,
+            datetime=None,
+            open='open',
+            high='high',
+            low='low',
+            close='close',
+            volume='volume',
+            openinterest=-1
+        )
+        
+        # 運行 Backtrader 計算指標
+        cerebro = bt.Cerebro()
+        cerebro.adddata(bt_data)
+        cerebro.addstrategy(IndicatorCalculator)
+        
+        strategies = cerebro.run()
+        calculator = strategies[0]
+        
+        # 將指標值添加到數據中
+        # 注意：Backtrader 需要一定數量的數據來初始化指標，所以前面幾根 K 線沒有值
+        # 我們需要對齊長度
+        data_len = len(self.raw_data)
+        indicator_len = len(calculator.indicator_values['mhull'])
+        
+        # 前面補 0
+        padding = data_len - indicator_len
+        
+        for key in calculator.indicator_values:
+            padded_values = [0] * padding + calculator.indicator_values[key]
+            self.raw_data[key] = padded_values[:data_len]  # 確保長度一致
+    
+    def reset(self):
+        """重置環境"""
+        self.current_step = 0
+        self.cash = self.initial_cash
+        self.position = 0  # 0: 無持倉, 1: 持倉
+        self.entry_price = 0
+        self.total_profit = 0
+        self.num_trades = 0
+        self.state_history = deque(maxlen=SAC_CONFIG['normalization_window'])
+        return self._get_state()
+    
+    def _get_state(self):
+        """構建狀態向量"""
+        if self.current_step >= len(self.raw_data):
+            return None
+        
+        row = self.raw_data.iloc[self.current_step]
+        
+        # 從預計算的指標獲取值
+        current_price = row['close']
+        mhull = row['mhull']
+        shull = row['shull']
+        signal = row['signal']
+        rsi = row['rsi']
+        cci = row['cci']
+        volume = row['volume']
+        
+        # 價格變化率
         price_changes = []
-        
-        for i in range(1, period + 1):
-            if len(self.data) > i:
-                price_change = (self.data.close[0] - self.data.close[-i]) / self.data.close[-i]
+        for i in range(1, SAC_CONFIG['price_change_period'] + 1):
+            if self.current_step >= i:
+                prev_price = self.raw_data.iloc[self.current_step - i]['close']
+                price_change = (current_price - prev_price) / prev_price
             else:
                 price_change = 0
             price_changes.append(price_change)
         
-        # 組合狀態向量
-        state_list = [mhull, shull, signal, volume, current_price]
-        state_list.extend(price_changes)
-        state_list.extend([rsi, cci])
+        # 組合狀態
+        state = [mhull, shull, signal, volume, current_price] + price_changes + [rsi, cci]
+        state = np.array(state, dtype=np.float32)
         
-        return np.array(state_list, dtype=np.float32)
+        # Z-score 正規化
+        return self._normalize_state(state)
     
     def _normalize_state(self, state):
-        """使用 Z-score 正規化狀態向量"""
+        """Z-score 正規化"""
         self.state_history.append(state.copy())
         
         if len(self.state_history) < 2:
@@ -97,121 +168,6 @@ class TrainingStrategy(bt.Strategy):
         
         return (state - mean) / std
     
-    def next(self):
-        """每根 K 線執行一次"""
-        # 構建當前狀態
-        raw_state = self._build_state()
-        normalized_state = self._normalize_state(raw_state)
-        self.current_state = normalized_state
-        
-        # 從外部獲取動作（由 environment 設置）
-        if hasattr(self, 'next_action'):
-            action = self.next_action
-        else:
-            return
-        
-        self.current_action = action
-        action_value = action[0]
-        
-        # 執行交易決策
-        if not self.position:
-            # 無持倉時
-            if action_value > 0.3:  # 買入
-                self.buy()
-        else:
-            # 有持倉時
-            if action_value < -0.3:  # 賣出
-                self.close()
-        
-        self.step_count += 1
-        self.last_price = self.data.close[0]
-    
-    def notify_trade(self, trade):
-        """交易完成時的回調"""
-        if trade.isclosed:
-            # 計算該筆交易的收益率
-            profit_rate = trade.pnlcomm / (trade.price * trade.size)
-            self.trades_profit.append(profit_rate)
-    
-    def get_current_info(self):
-        """獲取當前狀態信息"""
-        current_value = self.broker.getvalue()
-        return {
-            'portfolio_value': current_value,
-            'cash': self.broker.getcash(),
-            'position': 1 if self.position else 0,
-            'trades_profit': sum(self.trades_profit) if self.trades_profit else 0,
-            'num_trades': len(self.trades_profit),
-            'price': self.data.close[0]
-        }
-
-
-class TradingEnvironment:
-    """使用 Backtrader 引擎的交易環境"""
-    def __init__(self, data, initial_cash=100000, commission=0.001):
-        """
-        參數：
-            data: pandas DataFrame，包含 OHLCV 數據
-            initial_cash: 初始資金
-            commission: 手續費率
-        """
-        self.raw_data = data.copy()
-        self.initial_cash = initial_cash
-        self.commission = commission
-        
-        # 準備 Backtrader 數據
-        if not isinstance(data.index, pd.DatetimeIndex):
-            data = data.reset_index(drop=True)
-            data.index = pd.date_range(start='2020-01-01', periods=len(data), freq='15min')
-        
-        self.bt_data = bt.feeds.PandasData(
-            dataname=data,
-            datetime=None,
-            open='open',
-            high='high',
-            low='low',
-            close='close',
-            volume='volume',
-            openinterest=-1
-        )
-        
-        # 初始化環境變數
-        self.cerebro = None
-        self.strategy = None
-        self.current_step = 0
-        self.done = False
-        
-        self.reset()
-    
-    def reset(self):
-        """重置環境"""
-        # 創建新的 Cerebro 實例
-        self.cerebro = bt.Cerebro()
-        
-        # 添加策略
-        self.cerebro.addstrategy(TrainingStrategy, sac_config=SAC_CONFIG)
-        
-        # 添加數據
-        self.cerebro.adddata(self.bt_data)
-        
-        # 設置初始資金和手續費
-        self.cerebro.broker.setcash(self.initial_cash)
-        self.cerebro.broker.setcommission(commission=self.commission)
-        
-        # 運行第一步以初始化策略
-        self.strategies = self.cerebro.run()
-        self.strategy = self.strategies[0]
-        
-        self.current_step = 0
-        self.done = False
-        self.initial_value = self.cerebro.broker.getvalue()
-        
-        # 獲取初始狀態
-        if hasattr(self.strategy, 'current_state') and self.strategy.current_state is not None:
-            return self.strategy.current_state
-        else:
-            return np.zeros(SAC_CONFIG['state_dim'], dtype=np.float32)
-    
     def step(self, action):
         """執行一步
         
@@ -221,65 +177,62 @@ class TradingEnvironment:
         返回：
             next_state, reward, done, info
         """
-        if self.done:
+        if self.current_step >= len(self.raw_data) - 1:
             return None, 0, True, {}
         
-        # 將動作傳遞給策略
-        self.strategy.next_action = action
+        current_price = self.raw_data.iloc[self.current_step]['close']
+        next_price = self.raw_data.iloc[self.current_step + 1]['close']
+        price_change = (next_price - current_price) / current_price
         
-        # 記錄執行前的資訊
-        prev_value = self.cerebro.broker.getvalue()
-        prev_info = self.strategy.get_current_info()
+        # 獲取技術指標（用於獎勵計算）
+        rsi = self.raw_data.iloc[self.current_step]['rsi']
+        cci = self.raw_data.iloc[self.current_step]['cci']
         
-        # 執行下一步（Backtrader 會自動調用 strategy.next()）
-        # 注意：這裡我們需要手動推進 cerebro，但 cerebro.run() 會運行完所有數據
-        # 所以我們需要一個不同的方法
+        # 執行交易（使用 Backtrader 風格的資金管理）
+        action_value = action[0]
         
-        # 獲取當前狀態和資訊
-        current_info = self.strategy.get_current_info()
+        if self.position == 0 and action_value > 0.3:
+            # 買入：滿倉
+            self.position = 1
+            self.entry_price = next_price * (1 + self.commission)  # 加上手續費
+        elif self.position == 1 and action_value < -0.3:
+            # 賣出
+            profit = (next_price * (1 - self.commission) - self.entry_price) / self.entry_price
+            self.total_profit += profit
+            self.cash = self.cash * (1 + profit)  # 更新資金
+            self.position = 0
+            self.num_trades += 1
         
         # 計算獎勵
-        rsi = self.strategy.rsi.rsi[0] if len(self.strategy.rsi) > 0 else 50
-        cci = self.strategy.cci.cci[0] if len(self.strategy.cci) > 0 else 0
-        
-        # 價格變化
-        if self.strategy.last_price is not None:
-            price_change = (current_info['price'] - self.strategy.last_price) / self.strategy.last_price
-        else:
-            price_change = 0
-        
         reward = calculate_reward(
-            position=current_info['position'],
-            action=action[0],
+            position=self.position,
+            action=action_value,
             price_change=price_change,
             rsi=rsi,
             cci=cci,
             commission=self.commission
         )
         
-        # 獲取下一個狀態
-        next_state = self.strategy.current_state if hasattr(self.strategy, 'current_state') else None
-        
+        # 下一步
         self.current_step += 1
+        next_state = self._get_state()
+        done = self.current_step >= len(self.raw_data) - 1
         
-        # 檢查是否完成
-        if self.current_step >= len(self.raw_data) - 1:
-            self.done = True
-        
-        # 計算總收益
-        current_value = self.cerebro.broker.getvalue()
-        total_profit = (current_value - self.initial_value) / self.initial_value
+        # 計算總資產值
+        current_value = self.cash
+        if self.position == 1:
+            # 如果有持倉，計算當前市值
+            current_value = self.cash * (1 + (next_price - self.entry_price) / self.entry_price)
         
         info = {
-            'position': current_info['position'],
-            'total_profit': total_profit,
-            'trades_profit': current_info['trades_profit'],
-            'num_trades': current_info['num_trades'],
+            'position': self.position,
+            'total_profit': self.total_profit,
+            'num_trades': self.num_trades,
             'portfolio_value': current_value,
-            'price': current_info['price']
+            'price': next_price
         }
         
-        return next_state, reward, self.done, info
+        return next_state, reward, done, info
 
 
 def train_episode(env, agent, replay_buffer, config):
@@ -418,7 +371,7 @@ def walk_forward_train(data, sac_config, walk_config, train_config):
         print(f"{'=' * 80}")
         
         # 創建訓練環境和代理
-        train_env = TradingEnvironment(train_data)
+        train_env = TradingEnvironment(train_data, initial_cash=100000, commission=0.001)
         agent = create_sac_agent(
             state_dim=sac_config['state_dim'],
             action_dim=sac_config['action_dim'],
@@ -486,7 +439,7 @@ def walk_forward_train(data, sac_config, walk_config, train_config):
         
         # 在測試集上評估
         print(f"\n開始測試...")
-        test_env = TradingEnvironment(test_data)
+        test_env = TradingEnvironment(test_data, initial_cash=100000, commission=0.001)
         test_reward, test_profit = evaluate(test_env, agent)
         
         print(f"測試結果: Reward={test_reward:.2f}, Profit={test_profit:.4f}")
